@@ -1,12 +1,12 @@
 import sys
 import json
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, 
     QDialog, QHBoxLayout, QLineEdit, QTextEdit, QMenuBar, QAction, QFileDialog,
-    QMessageBox, QComboBox
+    QMessageBox, QComboBox, QPushButton
 )
-from PyQt5.QtGui import QFont, QPainter, QPen, QColor
-from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont, QPainter, QPen, QColor, QBrush
+from PyQt5.QtCore import Qt, QPropertyAnimation, pyqtProperty, QRect, QEasingCurve
 
 class CourseDialog(QDialog):
     def __init__(self, parent=None, existing_data=None, is_lecture=True):
@@ -22,51 +22,66 @@ class CourseDialog(QDialog):
         self.duration_combo.addItems(["50", "80", "110"])
 
         default_duration = "80" if is_lecture else "50"
-        self.duration_combo.setCurrentText(default_duration)
-
-        if existing_data:
+        is_new = (existing_data is None or len(existing_data) == 0)
+        
+        if not is_new:
             self.course_line.setText(existing_data.get("course_name", ""))
             self.instructor_line.setText(existing_data.get("instructor_name", ""))
             self.remarks_text.setPlainText(existing_data.get("remarks", ""))
             current_duration = existing_data.get("duration", default_duration)
-            self.duration_combo.setCurrentText(current_duration)
+        else:
+            current_duration = default_duration
+
+        self.duration_combo.setCurrentText(current_duration)
 
         form_layout = QVBoxLayout()
 
         lbl_course = QLabel("Course Name (required):")
-        lbl_course.setFont(QFont("Arial", 11))
+        lbl_course.setFont(QFont("Arial", 10))
         form_layout.addWidget(lbl_course)
         form_layout.addWidget(self.course_line)
 
         lbl_instructor = QLabel("Instructor Name (optional):")
-        lbl_instructor.setFont(QFont("Arial", 11))
+        lbl_instructor.setFont(QFont("Arial", 10))
         form_layout.addWidget(lbl_instructor)
         form_layout.addWidget(self.instructor_line)
 
         lbl_remarks = QLabel("Remarks (optional):")
-        lbl_remarks.setFont(QFont("Arial", 11))
+        lbl_remarks.setFont(QFont("Arial", 10))
         form_layout.addWidget(lbl_remarks)
         form_layout.addWidget(self.remarks_text)
 
         lbl_duration = QLabel("Class Duration (mins):")
-        lbl_duration.setFont(QFont("Arial", 11))
+        lbl_duration.setFont(QFont("Arial", 10))
         form_layout.addWidget(lbl_duration)
         form_layout.addWidget(self.duration_combo)
 
         btn_layout = QHBoxLayout()
-        self.save_btn = QPushButton("Save")
-        self.delete_btn = QPushButton("Delete")
+        
+        # Adjust button order: Save at the right and default.
+        # If it's a new slot, no delete.
         self.cancel_btn = QPushButton("Cancel")
-
-        btn_layout.addWidget(self.save_btn)
-        btn_layout.addWidget(self.delete_btn)
+        self.cancel_btn.setFont(QFont("Arial", 10))
         btn_layout.addWidget(self.cancel_btn)
+        
+        if not is_new:
+            self.delete_btn = QPushButton("Delete")
+            self.delete_btn.setFont(QFont("Arial", 10))
+            btn_layout.addWidget(self.delete_btn)
+        else:
+            self.delete_btn = None
+
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setFont(QFont("Arial", 10))
+        self.save_btn.setDefault(True)
+        btn_layout.addWidget(self.save_btn)
 
         form_layout.addLayout(btn_layout)
         self.setLayout(form_layout)
 
         self.save_btn.clicked.connect(self.save_course)
-        self.delete_btn.clicked.connect(self.delete_course)
+        if self.delete_btn:
+            self.delete_btn.clicked.connect(self.delete_course)
         self.cancel_btn.clicked.connect(self.reject)
 
         self.saved_data = None
@@ -94,81 +109,192 @@ class CourseDialog(QDialog):
         self.accept()
 
 
-class TimeSlotWidget(QPushButton):
-    def __init__(self, parent, day_idx, slot_idx, start_min_offset, column_x, y_offset_top, pixel_per_minute, width=140, is_lecture=True):
-        super().__init__("", parent)
+class TimeSlotWidget(QWidget):
+    def __init__(self, parent, day_idx, slot_idx, start_min_offset, column_x, y_offset_top, pixel_per_minute, is_lecture=True):
+        super().__init__(parent)
         self.day_idx = day_idx
         self.slot_idx = slot_idx
         self.start_min_offset = start_min_offset
         self.pixel_per_minute = pixel_per_minute
         self.column_x = column_x
         self.y_offset_top = y_offset_top
-        self.width = width
         self.is_lecture = is_lecture
 
-        # Default duration
-        self.current_duration = 80 if is_lecture else 50
+        self.setFont(QFont("Arial", 10))
 
-        self.set_font()
-        self.setToolTip("Click to edit")
+        # States
+        self.state = "empty"
+        self.course_name = ""
+        self.instructor = ""
+        self.remarks = ""
+        self.duration = 80 if is_lecture else 50
 
-        if self.is_lecture:
-            # Lecture
-            self.setStyleSheet("""
-                QPushButton {
-                    background-color: #FFF8DC; 
-                    border: 1px solid #AAAAAA; 
-                    border-radius: 4px; 
-                    font-size: 11pt;
-                    padding: 2px;
-                }
-                QPushButton:hover {
-                    background-color: #FFEFD5;
-                }
-            """)
-        else:
-            # Tutorial
-            self.setStyleSheet("""
-                QPushButton {
-                    background-color: #E0FFE0; 
-                    border: 1px solid #AAAAAA; 
-                    border-radius: 4px; 
-                    font-size: 11pt;
-                    padding: 2px;
-                }
-                QPushButton:hover {
-                    background-color: #D0FFD0;
-                }
-            """)
+        self.setToolTip("Click to add course")
+        self.setMouseTracking(True)  # For hover
+        self.resize_slot()
 
-        self.update_geometry()
+        # Animated properties
+        self._borderWidth = 1
+        self._borderColor = QColor("#AAAAAA")
+        self._borderStyle = "dashed"
+        self._fillColor = QColor(0,0,0,0)
 
-    def set_font(self):
-        f = QFont("Arial", 11)
-        self.setFont(f)
+        # Faster and smoother animations
+        self.enter_animation = QPropertyAnimation(self, b"borderWidth")
+        self.enter_animation.setDuration(150)
+        self.enter_animation.setEasingCurve(QEasingCurve.InOutCubic)
 
-    def update_duration(self, duration):
-        self.current_duration = int(duration)
-        self.update_geometry()
+        self.leave_animation = QPropertyAnimation(self, b"borderWidth")
+        self.leave_animation.setDuration(150)
+        self.leave_animation.setEasingCurve(QEasingCurve.InOutCubic)
 
-    def update_info(self, course_name, instructor, remarks):
-        # Display course name and instructor
-        if instructor:
-            display_text = f"{course_name}\n{instructor}"
-        else:
-            display_text = course_name
-        tooltip = f"Course: {course_name}" if course_name else "Click to edit"
-        if instructor:
-            tooltip += f"\nInstructor: {instructor}"
-        if remarks:
-            tooltip += f"\nRemarks: {remarks}"
-        self.setText(display_text)
-        self.setToolTip(tooltip)
-
-    def update_geometry(self):
+    def resize_slot(self):
         top = self.start_min_offset * self.pixel_per_minute
-        height = self.current_duration * self.pixel_per_minute
-        self.setGeometry(self.column_x, self.y_offset_top + top, self.width, height)
+        height = self.duration * self.pixel_per_minute
+        # smaller width
+        self.setGeometry(self.column_x, self.y_offset_top + top, 120, height)
+
+    @pyqtProperty(int)
+    def borderWidth(self):
+        return self._borderWidth
+
+    @borderWidth.setter
+    def borderWidth(self, w):
+        self._borderWidth = w
+        self.update()
+
+    @pyqtProperty(QColor)
+    def borderColor(self):
+        return self._borderColor
+
+    @borderColor.setter
+    def borderColor(self, c):
+        self._borderColor = c
+        self.update()
+
+    def setState(self, state):
+        self.state = state
+        if state == "empty":
+            self._borderStyle = "dashed"
+            self._borderColor = QColor("#AAAAAA")
+            self._borderWidth = 1
+            self._fillColor = QColor(0,0,0,0)
+            self.setToolTip("Click to add course")
+        elif state == "filled":
+            self._borderStyle = "solid"
+            self._borderColor = QColor("#000000")
+            self._borderWidth = 2
+            self._fillColor = QColor("#FFFFCC") if self.is_lecture else QColor("#CCFFCC")
+            if self.instructor:
+                self.setToolTip(f"Course: {self.course_name}\nInstructor: {self.instructor}\nRemarks: {self.remarks}")
+            else:
+                self.setToolTip(f"Course: {self.course_name}\nRemarks: {self.remarks}")
+        elif state == "conflict":
+            self._borderStyle = "dashed"
+            self._borderColor = QColor("#AAAAAA")
+            self._borderWidth = 1
+            self._fillColor = QColor(0,0,0,0)
+            self.setToolTip("Unavailable due to conflict")
+
+        self.update()
+
+    def setCourseInfo(self, course_name, instructor, remarks, duration):
+        self.course_name = course_name
+        self.instructor = instructor
+        self.remarks = remarks
+        self.duration = int(duration)
+        self.resize_slot()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        # Draw fill
+        painter.setBrush(QBrush(self._fillColor))
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(self.rect())
+
+        # Draw border
+        pen = QPen(self._borderColor, self._borderWidth)
+        if self._borderStyle == "dashed":
+            pen.setStyle(Qt.DashLine)
+        else:
+            pen.setStyle(Qt.SolidLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(self.rect())
+
+        # Draw text if filled, centered
+        if self.state == "filled":
+            painter.setPen(Qt.black)
+            painter.setFont(QFont("Arial", 10))
+            text = self.course_name
+            if self.instructor:
+                text += "\n" + self.instructor
+            # Center text
+            painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, text)
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if self.state == "empty":
+            self.enter_animation.stop()
+            self.enter_animation.setStartValue(self.borderWidth)
+            self.enter_animation.setEndValue(3)
+            self.enter_animation.start()
+            self._borderColor = QColor("#000000")
+            self._borderStyle = "solid"
+            self.update()
+        elif self.state == "conflict":
+            self.enter_animation.stop()
+            self.enter_animation.setStartValue(self.borderWidth)
+            self.enter_animation.setEndValue(3)
+            self.enter_animation.start()
+            self._borderColor = QColor("#FF0000")
+            self._borderStyle = "solid"
+            self.update()
+        elif self.state == "filled":
+            self.enter_animation.stop()
+            self.enter_animation.setStartValue(self.borderWidth)
+            self.enter_animation.setEndValue(3)
+            self.enter_animation.start()
+            self._borderColor = QColor("#000000")
+            self._borderStyle = "solid"
+            self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        # On leave, revert to original style based on state
+        if self.state == "empty":
+            self.leave_animation.stop()
+            self.leave_animation.setStartValue(self.borderWidth)
+            self.leave_animation.setEndValue(1)
+            self.leave_animation.start()
+            self._borderColor = QColor("#AAAAAA")
+            self._borderStyle = "dashed"
+            self.update()
+        elif self.state == "conflict":
+            self.leave_animation.stop()
+            self.leave_animation.setStartValue(self.borderWidth)
+            self.leave_animation.setEndValue(1)
+            self.leave_animation.start()
+            self._borderColor = QColor("#AAAAAA")
+            self._borderStyle = "dashed"
+            self.update()
+        elif self.state == "filled":
+            # When filled and user leaves, go back to borderWidth=2
+            self.leave_animation.stop()
+            self.leave_animation.setStartValue(self.borderWidth)
+            self.leave_animation.setEndValue(2)
+            self.leave_animation.start()
+            self._borderColor = QColor("#000000")
+            self._borderStyle = "solid"
+            self.update()
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if self.state == "conflict":
+            return
+        # Edit slot
+        self.window().edit_slot(self.day_idx, self.slot_idx)
 
 
 class ScheduleWidget(QWidget):
@@ -177,21 +303,20 @@ class ScheduleWidget(QWidget):
         self.timetable_data = timetable_data
         self.days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
-        # slot times: (label, offset_min, is_lecture)
         self.slots_info = [
-            ("8:30am", 0, True),    
-            ("10:30am", 120, True), 
-            ("1:30pm", 300, True),  
-            ("3:30pm", 420, True),  
-            ("6:00pm", 570, False), 
-            ("7:00pm", 630, False), 
-            ("8:00pm", 690, False)  
+            ("8:30am", 0, True),
+            ("10:30am", 120, True),
+            ("1:30pm", 300, True),
+            ("3:30pm", 420, True),
+            ("6:00pm", 570, False),
+            ("7:00pm", 630, False),
+            ("8:00pm", 690, False)
         ]
 
         self.pixel_per_minute = 1
         self.y_offset_top = 50
         self.x_offset_initial = 100
-        self.base_width = 140
+        self.base_width = 120
 
         total_height = self.y_offset_top + 750*self.pixel_per_minute + 50
         total_width = self.x_offset_initial + (self.base_width * len(self.days)) + 100
@@ -201,7 +326,6 @@ class ScheduleWidget(QWidget):
         self.initUI()
 
     def initUI(self):
-        # Day labels
         font_day = QFont("Arial", 12, QFont.Bold)
         for i, day in enumerate(self.days):
             lbl = QLabel(day, self)
@@ -210,43 +334,66 @@ class ScheduleWidget(QWidget):
             day_x = self.x_offset_initial + i * self.base_width
             lbl.setGeometry(day_x, 0, self.base_width, self.y_offset_top - 20)
 
-        # Create slot widgets
         for day_idx in range(len(self.days)):
             for slot_idx, (time_str, offset_min, is_lecture) in enumerate(self.slots_info):
                 column_x = self.x_offset_initial + day_idx * self.base_width
                 w = TimeSlotWidget(self, day_idx, slot_idx, offset_min, column_x, self.y_offset_top, self.pixel_per_minute, is_lecture=is_lecture)
-                data = self.timetable_data.get((day_idx, slot_idx), {})
-                if data:
-                    w.update_info(data.get("course_name",""), data.get("instructor_name",""), data.get("remarks",""))
-                    w.update_duration(data.get("duration","80" if is_lecture else "50"))
-                else:
-                    default_dur = "80" if is_lecture else "50"
-                    w.update_info("", "", "")
-                    w.update_duration(default_dur)
-
-                w.clicked.connect(lambda _, d=day_idx, s=slot_idx: self.window().edit_slot(d, s))
                 self.slot_widgets[(day_idx, slot_idx)] = w
+                w.setState("empty")
+
+        self.update_conflicts()
 
     def refresh_slot(self, day_idx, slot_idx, data):
         w = self.slot_widgets[(day_idx, slot_idx)]
         _, _, is_lecture = self.slots_info[slot_idx]
         if not data:
-            default_dur = "80" if is_lecture else "50"
-            w.update_info("", "", "")
-            w.update_duration(default_dur)
+            w.setCourseInfo("", "", "", "80" if is_lecture else "50")
+            w.setState("empty")
         else:
-            w.update_info(data.get("course_name",""), data.get("instructor_name",""), data.get("remarks",""))
-            w.update_duration(data.get("duration", "80" if is_lecture else "50"))
-        self.update()
+            duration = data.get("duration", "80" if is_lecture else "50")
+            w.setCourseInfo(data.get("course_name",""), data.get("instructor_name",""), data.get("remarks",""), duration)
+            w.setState("filled")
+
+        self.update_conflicts()
+
+    def update_conflicts(self):
+        # Reset states first
+        for (d, s), w in self.slot_widgets.items():
+            data = self.window().timetable_data.get((d, s), {})
+            _, _, is_lecture = self.slots_info[s]
+            if data:
+                w.setState("filled")
+            else:
+                w.setState("empty")
+
+        for day_idx in range(len(self.days)):
+            ends = []
+            for slot_idx, (tstr, start_min, is_lecture) in enumerate(self.slots_info):
+                data = self.window().timetable_data.get((day_idx, slot_idx), {})
+                if data:
+                    duration = int(data.get("duration", "80" if is_lecture else "50"))
+                else:
+                    duration = 80 if is_lecture else 50
+                end_min = start_min + duration
+                ends.append((slot_idx, start_min, end_min))
+
+            # Check overlaps
+            for i in range(len(ends)):
+                for j in range(i+1, len(ends)):
+                    if ends[i][2] > ends[j][1]:
+                        w_conflict = self.slot_widgets[(day_idx, ends[j][0])]
+                        # Mark conflict if not currently filled or even if filled
+                        w_conflict.setState("conflict")
+                        w_conflict.setToolTip("Unavailable due to conflict")
 
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        # Draw background lines every 30 minutes
+        # Background lines every 30 minutes
         start_offset = 0
-        end_offset = 750  # 8:30am to 9:00pm
+        end_offset = 750
         painter.setPen(QPen(QColor("#DDDDDD"), 1, Qt.DotLine))
         minute = 0
         while minute <= end_offset:
@@ -254,9 +401,8 @@ class ScheduleWidget(QWidget):
             painter.drawLine(self.x_offset_initial - 30, y_pos, self.width()-20, y_pos)
             minute += 30
 
-        # Label every 30 min
         painter.setPen(QPen(Qt.black, 1))
-        painter.setFont(QFont("Arial", 11))
+        painter.setFont(QFont("Arial", 10))
 
         def minutes_to_hhmm(m):
             base_hour = 8
@@ -275,26 +421,12 @@ class ScheduleWidget(QWidget):
             painter.drawText(self.x_offset_initial - 90, y_pos+4, time_str)
             minute += 30
 
-        # Add ending times of classes (in black, no extra line)
-        # We only add ending times that don't coincide with existing lines (to show difference)
-        # Actually, we can show them anyway, just as text on the left.
-        # We'll show all class end times next to the line if it's not already shown.
-        # If it's exactly on a 30-min line, it will be duplicated - acceptable for simplicity.
-        for (d, s), data in self.timetable_data.items():
-            _, start_offset_min, _ = self.slots_info[s]
-            duration = int(data.get("duration", "80"))
-            end_offset_min = start_offset_min + duration
-            if 0 <= end_offset_min <= 750:
-                y_pos = self.y_offset_top + end_offset_min * self.pixel_per_minute
-                end_time_str = minutes_to_hhmm(end_offset_min)
-                painter.drawText(self.x_offset_initial - 90, y_pos+4, end_time_str)
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Undergrad Course Scheduler")
-        self.resize(1100, 900)
+        self.resize(900, 700)
         self.timetable_data = {}
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -303,7 +435,6 @@ class MainWindow(QMainWindow):
         self.schedule_widget = ScheduleWidget(self.timetable_data)
         layout.addWidget(self.schedule_widget)
 
-        # Menus
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
 
@@ -328,7 +459,7 @@ class MainWindow(QMainWindow):
         }
         QLabel {
             font-family: Arial;
-            font-size: 11pt;
+            font-size: 10pt;
         }
         QMenuBar {
             background-color: #ffffff;
@@ -344,6 +475,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(qss)
 
     def edit_slot(self, day_idx, slot_idx):
+        w = self.schedule_widget.slot_widgets[(day_idx, slot_idx)]
+        if w.state == "conflict":
+            return
         _, _, is_lecture = self.schedule_widget.slots_info[slot_idx]
         existing = self.timetable_data.get((day_idx, slot_idx), {})
         dialog = CourseDialog(self, existing_data=existing if existing else None, is_lecture=is_lecture)
@@ -357,7 +491,6 @@ class MainWindow(QMainWindow):
                 self.schedule_widget.refresh_slot(day_idx, slot_idx, dialog.saved_data)
 
     def save_timetable(self):
-        # Convert keys to strings
         str_data = {}
         for (d, s), val in self.timetable_data.items():
             key = f"{d},{s}"
